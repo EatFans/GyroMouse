@@ -2,8 +2,11 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>手机光标控制器</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <style>
   body { margin:0; font-family:sans-serif; display:flex; flex-direction:column; align-items:center; height:100vh; user-select:none; background:#f5f5f5;}
   h2 { margin:10px 0; }
@@ -14,11 +17,51 @@
   .arrows { display:flex; justify-content:center; margin-bottom:20px; gap:10px; }
   .arrow-btn { padding:15px 20px; font-size:18px; border:none; border-radius:8px; background:#28a745; color:#fff; cursor:pointer; }
   .arrow-btn:active { background:#1e7e34; }
+  
+  /* QR码扫描相关样式 */
+  #qrScanner { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); z-index:1000; flex-direction:column; align-items:center; justify-content:center; }
+  #video { width:90%; max-width:500px; border:3px solid #fff; border-radius:12px; background:#000; }
+  #qrResult { color:#fff; margin:20px 0; font-size:18px; text-align:center; max-width:90%; line-height:1.4; }
+  #closeScanner { padding:15px 30px; font-size:18px; border:none; border-radius:8px; background:#dc3545; color:#fff; cursor:pointer; margin-top:20px; min-width:120px; }
+  #scanQR { padding:15px; font-size:18px; border:none; border-radius:8px; background:#17a2b8; color:#fff; cursor:pointer; width:90%; margin:10px 0; }
+  #manualConnect { padding:15px; font-size:18px; border:none; border-radius:8px; background:#6c757d; color:#fff; cursor:pointer; width:90%; margin:5px 0; }
+  #manualInput { display:none; width:90%; margin:10px 0; }
+  #ipInput { width:70%; padding:12px; font-size:16px; border:2px solid #ccc; border-radius:6px; margin-right:5px; }
+  #connectIP { width:25%; padding:12px; font-size:16px; border:none; border-radius:6px; background:#28a745; color:#fff; cursor:pointer; }
+  .hidden { display:none !important; }
+  .scanner-active { display:flex !important; }
+  
+  /* 移动端优化 */
+  @media (max-width: 600px) {
+    #video { width:95%; max-width:none; }
+    #qrResult { font-size:16px; margin:15px 10px; }
+    #closeScanner { padding:12px 25px; font-size:16px; }
+    #scanQR, #manualConnect { font-size:16px; padding:12px; }
+  }
+  
+  /* iOS Safari特殊优化 */
+  @supports (-webkit-touch-callout: none) {
+    body { -webkit-user-select: none; -webkit-touch-callout: none; }
+    button { -webkit-appearance: none; }
+  }
 </style>
 </head>
 <body>
 
 <h2>手机控制鼠标</h2>
+
+<button id="scanQR">扫描二维码连接服务器</button>
+<button id="manualConnect">手动输入IP地址</button>
+<div id="manualInput" style="display:none; width:90%; margin:10px 0;">
+  <input type="text" id="ipInput" placeholder="输入服务器IP地址 (如: 192.168.1.100)" style="width:70%; padding:10px; font-size:16px; border:1px solid #ccc; border-radius:4px;">
+  <button id="connectIP" style="width:25%; padding:10px; font-size:16px; border:none; border-radius:4px; background:#28a745; color:#fff; cursor:pointer;">连接</button>
+</div>
+
+<div id="qrScanner">
+  <video id="video" autoplay muted playsinline></video>
+  <div id="qrResult">请将二维码对准摄像头</div>
+  <button id="closeScanner">关闭扫描</button>
+</div>
 
 <div id="touchArea">滑动此区域控制鼠标</div>
 
@@ -42,7 +85,305 @@
 <script>
   let gyroEnabled = false;
   const SENSITIVITY = 5; // 可调节
+  let serverIP = null;
+  let wsMouseMove = null;
+  let wsAction = null;
 
+  // QR码扫描相关变量
+  let video = null;
+  let canvas = null;
+  let scanning = false;
+  let currentStream = null; // 保存当前视频流以便清理
+
+  // 获取本地IP地址（从URL参数或二维码扫描结果）
+  function getServerIP() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const ipParam = urlParams.get('ip');
+    if (ipParam) {
+      return ipParam;
+    }
+    return serverIP;
+  }
+  
+  // 显示当前连接的IP地址
+  function showCurrentIP() {
+    const ip = getServerIP();
+    if (ip) {
+      const ipDisplay = document.createElement('div');
+      ipDisplay.id = 'currentIP';
+      ipDisplay.style.cssText = 'position:fixed; top:10px; right:10px; background:rgba(0,0,0,0.6); color:#fff; padding:8px 12px; border-radius:5px; z-index:1000; font-size:12px;';
+      ipDisplay.textContent = `已连接: ${ip}`;
+      document.body.appendChild(ipDisplay);
+      
+      // 10秒后自动隐藏
+      setTimeout(() => {
+        if (ipDisplay.parentNode) {
+          ipDisplay.parentNode.removeChild(ipDisplay);
+        }
+      }, 10000);
+    }
+  }
+
+  // QR码扫描功能
+  async function startQRScanner() {
+    const scanner = document.getElementById('qrScanner');
+    const resultDiv = document.getElementById('qrResult');
+    
+    scanner.classList.add('scanner-active');
+    scanning = true;
+    
+    if (!video) {
+      video = document.getElementById('video');
+      canvas = document.createElement('canvas');
+    }
+    
+    // 检测浏览器是否支持摄像头
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      resultDiv.innerHTML = '您的浏览器不支持摄像头功能<br>请使用Chrome、Safari或Firefox浏览器';
+      setTimeout(stopQRScanner, 5000);
+      return;
+    }
+    
+    // iOS Safari特殊处理
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+    
+    // 检查是否在HTTPS环境下（iOS要求）
+    if (window.location.protocol === 'https:') {
+      console.log('在HTTPS环境下运行，摄像头权限应该正常');
+    } else {
+      console.log('在HTTP环境下运行，某些功能可能受限');
+      resultDiv.textContent = '注意：为了获得最佳体验，请使用HTTPS访问';
+    }
+    
+    // iOS Safari需要用户手势触发
+      if (isIOS) {
+        resultDiv.textContent = 'iOS设备检测到，正在请求摄像头权限...';
+      }
+
+      // 尝试检测权限状态（如果支持）
+      if (navigator.permissions && navigator.permissions.query) {
+        try {
+          const permission = await navigator.permissions.query({ name: 'camera' });
+          if (permission.state === 'denied') {
+            resultDiv.innerHTML = '摄像头权限已被拒绝<br>请在浏览器设置中允许访问';
+            if (isIOS) {
+              resultDiv.innerHTML += '<br>iOS：设置 > Safari > 相机 > 允许';
+            }
+            setTimeout(stopQRScanner, 5000);
+            return;
+          }
+        } catch (e) {
+          console.log('无法检测权限状态，继续尝试');
+        }
+      }
+    
+    try {
+      // 先尝试使用后置摄像头
+      const constraints = {
+        video: {
+          facingMode: { exact: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          // iOS Safari需要额外的约束
+          frameRate: { ideal: 30 }
+        }
+      };
+      
+      let stream = await navigator.mediaDevices.getUserMedia(constraints);
+      currentStream = stream; // 保存引用以便清理
+      video.srcObject = stream;
+      video.play();
+      requestAnimationFrame(scanQRCode);
+      
+    } catch (err) {
+      console.log('后置摄像头访问失败，尝试前置摄像头:', err);
+      
+      try {
+        // 如果后置摄像头失败，尝试使用前置摄像头
+        const fallbackConstraints = {
+          video: {
+            facingMode: 'user',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        };
+        
+        let stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        currentStream = stream; // 保存引用以便清理
+        video.srcObject = stream;
+        video.play();
+        requestAnimationFrame(scanQRCode);
+        
+      } catch (fallbackErr) {
+        resultDiv.textContent = '无法访问摄像头: ' + fallbackErr.message;
+        console.error('摄像头访问错误:', fallbackErr);
+        
+        // 如果都失败了，尝试最基本的视频约束
+        try {
+          const basicConstraints = { video: true };
+          let stream = await navigator.mediaDevices.getUserMedia(basicConstraints);
+          video.srcObject = stream;
+          video.play();
+          requestAnimationFrame(scanQRCode);
+        } catch (basicErr) {
+          resultDiv.textContent = '无法访问摄像头，请检查权限设置: ' + basicErr.message;
+          console.error('基本摄像头访问错误:', basicErr);
+          
+          // 提供用户指导
+          if (basicErr.name === 'NotAllowedError') {
+            resultDiv.innerHTML = '摄像头权限被拒绝<br>请在浏览器设置中允许摄像头访问';
+          if (isIOS) {
+            resultDiv.innerHTML += '<br>iOS用户：设置 > Safari > 相机 > 允许';
+          }
+          } else if (basicErr.name === 'NotFoundError') {
+            resultDiv.innerHTML = '未找到摄像头设备<br>请确保设备有摄像头';
+          } else if (basicErr.name === 'NotReadableError') {
+            resultDiv.innerHTML = '摄像头被其他应用占用<br>请关闭其他使用摄像头的应用';
+          }
+        }
+      }
+    }
+  }
+
+  function stopQRScanner() {
+    scanning = false;
+    const scanner = document.getElementById('qrScanner');
+    scanner.classList.remove('scanner-active');
+    
+    // 正确清理视频流
+    if (currentStream) {
+      currentStream.getTracks().forEach(track => {
+        track.stop();
+      });
+      currentStream = null;
+    }
+    
+    if (video && video.srcObject) {
+      video.srcObject.getTracks().forEach(track => track.stop());
+      video.srcObject = null;
+    }
+    
+    // 清理视频元素
+    if (video) {
+      video.pause();
+      video.load();
+    }
+  }
+
+  function scanQRCode() {
+    if (!scanning) return;
+    
+    const canvasElement = canvas;
+    const canvasContext = canvasElement.getContext('2d');
+    
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvasElement.height = video.videoHeight;
+      canvasElement.width = video.videoWidth;
+      canvasContext.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
+      
+      const imageData = canvasContext.getImageData(0, 0, canvasElement.width, canvasElement.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'dontInvert',
+      });
+      
+      if (code) {
+        const resultDiv = document.getElementById('qrResult');
+        resultDiv.textContent = '二维码识别成功: ' + code.data;
+        
+        // 解析二维码中的IP地址
+        try {
+          const url = new URL(code.data);
+          const ipMatch = url.hostname.match(/\d+\.\d+\.\d+\.\d+/);
+          if (ipMatch) {
+            serverIP = ipMatch[0];
+            resultDiv.textContent += '\n正在连接到: ' + serverIP;
+            
+            // 停止扫描并连接WebSocket
+            setTimeout(() => {
+              stopQRScanner();
+              initializeWebSockets();
+            }, 1000);
+          } else {
+            resultDiv.textContent = '无法解析IP地址';
+          }
+        } catch (e) {
+          resultDiv.textContent = '二维码格式错误: ' + e.message;
+        }
+      }
+    }
+    
+    if (scanning) {
+      requestAnimationFrame(scanQRCode);
+    }
+  }
+
+  // 初始化WebSocket连接
+  function initializeWebSockets() {
+    const ip = getServerIP();
+    if (!ip) {
+      alert('请先扫描二维码获取服务器IP地址');
+      return;
+    }
+    
+    const wsUrl = `ws://${ip}:8000`;
+    console.log('正在连接到WebSocket服务器:', wsUrl);
+    
+    // 显示连接状态
+    const statusDiv = document.createElement('div');
+    statusDiv.id = 'connectionStatus';
+    statusDiv.style.cssText = 'position:fixed; top:10px; left:10px; background:rgba(0,0,0,0.7); color:#fff; padding:10px; border-radius:5px; z-index:1001; font-size:14px;';
+    statusDiv.textContent = '正在连接到服务器...';
+    document.body.appendChild(statusDiv);
+    
+    // 创建WebSocket连接
+    wsMouseMove = createWebSocket(`${wsUrl}/ws/mouse_move`, 
+      () => { updateConnectionStatus('鼠标连接成功', '#28a745'); },
+      null,
+      () => { updateConnectionStatus('鼠标连接断开', '#dc3545'); }
+    );
+    
+    wsAction = createWebSocket(`${wsUrl}/ws/action`,
+      () => { updateConnectionStatus('操作连接成功', '#28a745'); },
+      null,
+      () => { updateConnectionStatus('操作连接断开', '#dc3545'); }
+    );
+    
+    // 显示控制界面
+    document.getElementById('scanQR').style.display = 'none';
+    document.getElementById('touchArea').style.display = 'flex';
+    document.querySelector('.buttons').style.display = 'flex';
+    document.querySelector('.arrows').style.display = 'flex';
+    
+    // 显示当前连接的IP地址
+    showCurrentIP();
+    
+    // 5秒后隐藏状态提示
+    setTimeout(() => {
+      if (statusDiv.parentNode) {
+        statusDiv.parentNode.removeChild(statusDiv);
+      }
+    }, 5000);
+  }
+  
+  // 更新连接状态显示
+  function updateConnectionStatus(message, color) {
+    let statusDiv = document.getElementById('connectionStatus');
+    if (!statusDiv) {
+      statusDiv = document.createElement('div');
+      statusDiv.id = 'connectionStatus';
+      statusDiv.style.cssText = 'position:fixed; top:10px; left:10px; background:rgba(0,0,0,0.7); color:#fff; padding:10px; border-radius:5px; z-index:1001; font-size:14px;';
+      document.body.appendChild(statusDiv);
+    }
+    statusDiv.textContent = message;
+    statusDiv.style.backgroundColor = color || 'rgba(0,0,0,0.7)';
+    
+    // 3秒后自动隐藏
+    setTimeout(() => {
+      if (statusDiv.parentNode) {
+        statusDiv.parentNode.removeChild(statusDiv);
+      }
+    }, 3000);
+  }
 
   // 封装带自动重连的 WebSocket
   function createWebSocket(url, onOpen, onMessage, onClose) {
@@ -77,29 +418,67 @@
     // 提供发送函数
     return {
       send: (type, payload) => {
-        if(ws.readyState === WebSocket.OPEN){
+        if(ws && ws.readyState === WebSocket.OPEN){
           ws.send(JSON.stringify({ type, payload }));
+        } else {
+          console.warn('WebSocket未连接，无法发送消息');
         }
       }
     };
   }
 
-  // 创建两个 WebSocket
-  const wsMouseMove = createWebSocket(
-    "ws://10.18.133.7:8000/ws/mouse_move"
-  );
+  // 手动输入IP地址功能
+  document.getElementById('manualConnect').addEventListener('click', function() {
+    const manualInput = document.getElementById('manualInput');
+    manualInput.style.display = manualInput.style.display === 'none' ? 'block' : 'none';
+  });
 
-  const wsAction = createWebSocket(
-    "ws://10.18.133.7:8000/ws/action"
-  );
+  document.getElementById('connectIP').addEventListener('click', function() {
+    const ipInput = document.getElementById('ipInput');
+    const ip = ipInput.value.trim();
+    
+    // 验证IP地址格式
+    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (!ipRegex.test(ip)) {
+      alert('请输入有效的IP地址格式，如：192.168.1.100');
+      return;
+    }
+    
+    // 验证IP地址范围
+    const parts = ip.split('.');
+    for (let part of parts) {
+      if (parseInt(part) > 255) {
+        alert('IP地址范围无效');
+        return;
+      }
+    }
+    
+    serverIP = ip;
+    initializeWebSockets();
+  });
+
+  // 事件监听器
+  document.getElementById('scanQR').addEventListener('click', startQRScanner);
+  document.getElementById('closeScanner').addEventListener('click', stopQRScanner);
+
+  // 初始化时隐藏控制界面，显示扫描按钮
+  document.getElementById('touchArea').style.display = 'none';
+  document.querySelector('.buttons').style.display = 'none';
+  document.querySelector('.arrows').style.display = 'none';
 
   // 左右键
-  document.getElementById("leftClick").onclick = () => wsAction.send("mouse_click", { button:"left" });
-  document.getElementById("rightClick").onclick = () => wsAction.send("mouse_click", { button:"right" });
+  document.getElementById("leftClick").onclick = () => {
+    if (wsAction) wsAction.send("mouse_click", { button:"left" });
+  };
+  document.getElementById("rightClick").onclick = () => {
+    if (wsAction) wsAction.send("mouse_click", { button:"right" });
+  };
 
   // 方向键
   document.querySelectorAll(".arrow-btn").forEach(btn => {
-    btn.onclick = () => wsAction.send("keyboard_press", { key: btn.dataset.key });
+    btn.onclick = () => {
+      if (wsAction) wsAction.send("keyboard_press", { key: btn.dataset.key });
+    };
   });
 
   // 鼠标移动触摸区域
@@ -123,7 +502,7 @@
 
     if(!ticking){
       window.requestAnimationFrame(() => {
-        wsMouseMove.send("mouse_move", { dx, dy });
+        if (wsMouseMove) wsMouseMove.send("mouse_move", { dx, dy });
         ticking = false;
       });
       ticking = true;

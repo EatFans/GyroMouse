@@ -2,6 +2,8 @@ import pyautogui
 import asyncio
 import json
 import math
+import socket
+import qrcode
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +20,33 @@ async def get_web_index():
 
 # 鼠标灵敏度调节
 SENSITIVITY = 12
+
+def get_local_ip():
+    """获取本地内网IP地址"""
+    try:
+        # 创建一个UDP socket来获取本地IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "127.0.0.1"
+
+def generate_qr_code(ip_address, port=8000):
+    """生成包含服务器地址的二维码"""
+    server_url = f"http://{ip_address}:{port}"
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(server_url)
+    qr.make(fit=True)
+    
+    qr_img = qr.make_image(fill_color="black", back_color="white")
+    return qr_img, server_url
 
 
 @app.websocket("/ws/mouse_move")
@@ -64,4 +93,35 @@ async def websocket_endpoint(websocket: WebSocket):
         print("WebSocket 连接断开",e)
 
 if __name__ == '__main__':
-    uvicorn.run(app, host='0.0.0.0', port=8000)
+    # 获取本地IP地址
+    local_ip = get_local_ip()
+    port = 8000
+    
+    # 生成二维码
+    qr_img, server_url = generate_qr_code(local_ip, port)
+    
+    # 在终端中显示二维码
+    print("\n" + "="*50)
+    print("服务器启动信息:")
+    print(f"IP地址: {local_ip}")
+    print(f"端口: {port}")
+    print(f"完整地址: {server_url}")
+    print("\n请使用手机扫描下方二维码进行连接:")
+    print("="*50)
+    
+    # 在终端中打印二维码（使用ASCII字符）
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=1,
+        border=1,
+    )
+    qr.add_data(server_url)
+    qr.make(fit=True)
+    qr.print_ascii(invert=True)
+    
+    print("="*50)
+    print("二维码已生成，请用手机扫描后访问网页\n")
+    
+    # 启动服务器
+    uvicorn.run(app, host='0.0.0.0', port=port)
