@@ -4,6 +4,8 @@ import json
 import math
 import socket
 import qrcode
+import os
+import sys
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,12 +13,33 @@ import uvicorn
 
 app = FastAPI()
 
+# 获取正确的静态文件路径（处理打包后的情况）
+def get_static_path():
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的程序
+        return os.path.join(sys._MEIPASS, 'static')
+    else:
+        # 如果是开发环境
+        return 'static'
+
+# 获取正确的文件路径（处理打包后的情况）
+def get_file_path(filename):
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的程序
+        return os.path.join(sys._MEIPASS, filename)
+    else:
+        # 如果是开发环境
+        return filename
+
+static_path = get_static_path()
+
 # 挂载静态文件
-app.mount('/static', StaticFiles(directory='static'), name='static')
+app.mount('/static', StaticFiles(directory=static_path), name='static')
 
 @app.get("/")
 async def get_web_index():
-    return FileResponse("static/index.html")
+    index_path = os.path.join(static_path, 'index.html')
+    return FileResponse(index_path)
 
 # 鼠标灵敏度调节
 SENSITIVITY = 12
