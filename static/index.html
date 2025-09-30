@@ -34,45 +34,78 @@
   <button class="arrow-btn" data-key="right">→</button>
 </div>
 
+<div class="buttons">
+  <button id="gyroToggle">启用陀螺仪控制</button>
+</div>
+
+
 <script>
-  // 建立两个 WebSocket：鼠标移动/点击键盘
-  const wsMouseMove = new WebSocket("ws://10.18.133.7:8000/ws/mouse_move");
-  const wsAction = new WebSocket("ws://10.18.133.7:8000/ws/action");
+  let gyroEnabled = false;
+  const SENSITIVITY = 5; // 可调节
 
-  wsMouseMove.onopen = () => console.log("鼠标 WebSocket 已连接");
-  wsMouseMove.onclose = () => console.log("鼠标 WebSocket 已关闭");
-  wsMouseMove.onerror = e => console.error("鼠标 WebSocket 出错:", e);
 
-  wsAction.onopen = () => console.log("控制 WebSocket 已连接");
-  wsAction.onclose = () => console.log("控制 WebSocket 已关闭");
-  wsAction.onerror = e => console.error("控制 WebSocket 出错:", e);
+  // 封装带自动重连的 WebSocket
+  function createWebSocket(url, onOpen, onMessage, onClose) {
+    let ws;
 
-  // 发送函数
-  function sendMouseCommand(type, payload) {
-    if(wsMouseMove.readyState === WebSocket.OPEN){
-      wsMouseMove.send(JSON.stringify({ type, payload }));
+    function connect() {
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        console.log(`${url} 已连接`);
+        if(onOpen) onOpen();
+      };
+
+      ws.onmessage = event => {
+        if(onMessage) onMessage(event.data);
+      };
+
+      ws.onclose = () => {
+        console.log(`${url} 已关闭，3秒后重连`);
+        setTimeout(connect, 3000); // 3秒后重连
+        if(onClose) onClose();
+      };
+
+      ws.onerror = e => {
+        console.error(`${url} 出错`, e);
+        ws.close(); // 出错时关闭连接，触发重连
+      };
     }
+
+    connect();
+
+    // 提供发送函数
+    return {
+      send: (type, payload) => {
+        if(ws.readyState === WebSocket.OPEN){
+          ws.send(JSON.stringify({ type, payload }));
+        }
+      }
+    };
   }
 
-  function sendActionCommand(type, payload) {
-    if(wsAction.readyState === WebSocket.OPEN){
-      wsAction.send(JSON.stringify({ type, payload }));
-    }
-  }
+  // 创建两个 WebSocket
+  const wsMouseMove = createWebSocket(
+    "ws://10.18.133.7:8000/ws/mouse_move"
+  );
+
+  const wsAction = createWebSocket(
+    "ws://10.18.133.7:8000/ws/action"
+  );
 
   // 左右键
-  document.getElementById("leftClick").onclick = () => sendActionCommand("mouse_click", { button:"left" });
-  document.getElementById("rightClick").onclick = () => sendActionCommand("mouse_click", { button:"right" });
+  document.getElementById("leftClick").onclick = () => wsAction.send("mouse_click", { button:"left" });
+  document.getElementById("rightClick").onclick = () => wsAction.send("mouse_click", { button:"right" });
 
   // 方向键
   document.querySelectorAll(".arrow-btn").forEach(btn => {
-    btn.onclick = () => sendActionCommand("keyboard_press", { key: btn.dataset.key });
+    btn.onclick = () => wsAction.send("keyboard_press", { key: btn.dataset.key });
   });
 
   // 鼠标移动触摸区域
   const touchArea = document.getElementById("touchArea");
   let lastX = 0, lastY = 0;
-  let ticking = false; // 用 requestAnimationFrame 限制发送频率
+  let ticking = false;
 
   touchArea.addEventListener("touchstart", e => {
     const t = e.touches[0];
@@ -90,7 +123,7 @@
 
     if(!ticking){
       window.requestAnimationFrame(() => {
-        sendMouseCommand("mouse_move", { dx, dy });
+        wsMouseMove.send("mouse_move", { dx, dy });
         ticking = false;
       });
       ticking = true;
